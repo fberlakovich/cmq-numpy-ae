@@ -60,6 +60,11 @@
 #include "legacy_array_method.h"
 #include "abstractdtypes.h"
 
+#ifdef CMLQ_PAPI
+#include <papi.h>
+#endif
+
+
 /* TODO: Only for `NpyIter_GetTransferFlags` until it is public */
 #define NPY_ITERATOR_IMPLEMENTATION_CODE
 #include "nditer_impl.h"
@@ -671,6 +676,7 @@ _parse_signature(PyUFuncObject *ufunc, const char *signature)
     }
 
     ufunc->core_enabled = 1;
+    ufunc->specializable = 0;
     ufunc->core_num_dim_ix = 0;
     ufunc->core_num_dims = PyArray_malloc(sizeof(int) * ufunc->nargs);
     ufunc->core_offsets = PyArray_malloc(sizeof(int) * ufunc->nargs);
@@ -1169,6 +1175,100 @@ check_for_trivial_loop(PyArrayMethodObject *ufuncimpl,
 }
 
 
+int
+is_eligible_for_fast_path(int nin, PyArrayObject *op[], NPY_ORDER order,
+                          npy_intp strides_out[])
+{
+    int nop = nin + 1;
+
+    /* The order of all N-D contiguous operands, can be fixed by `order` */
+    int operation_order = 0;
+    if (order == NPY_CORDER) {
+        operation_order = NPY_ARRAY_C_CONTIGUOUS;
+    }
+    else if (order == NPY_FORTRANORDER) {
+        operation_order = NPY_ARRAY_F_CONTIGUOUS;
+    }
+
+    int operation_ndim = 0;
+    npy_intp *operation_shape = NULL;
+
+
+    for (int iop = 0; iop < nop; iop++) {
+        if (op[iop] == NULL) {
+            /* The out argument may be NULL (and only that one); fill later */
+            assert(iop == nin);
+            continue;
+        }
+
+        int op_ndim = PyArray_NDIM(op[iop]);
+
+        /* Special case 0-D since we can handle broadcasting using a 0-stride
+         */
+        if (op_ndim == 0 && iop < nin) {
+            strides_out[iop] = 0;
+            continue;
+        }
+
+        /* First non 0-D op: fix dimensions, shape (order is fixed later) */
+        if (operation_ndim == 0) {
+            operation_ndim = op_ndim;
+            operation_shape = PyArray_SHAPE(op[iop]);
+        }
+        else if (op_ndim != operation_ndim) {
+            return 2; /* dimension mismatch (except 0-d input ops) */
+        }
+        else if (!PyArray_CompareLists(operation_shape, PyArray_DIMS(op[iop]),
+                                       op_ndim)) {
+            return 2; /* shape mismatch */
+        }
+
+        if (op_ndim == 1) {
+            strides_out[iop] = PyArray_STRIDES(op[iop])[0];
+        }
+        else {
+            strides_out[iop] = PyArray_ITEMSIZE(op[iop]); /* contiguous */
+
+            /* This op must match the operation order (and be contiguous) */
+            int op_order = (PyArray_FLAGS(op[iop]) &
+                            (NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_F_CONTIGUOUS));
+            if (op_order == 0) {
+                return 2; /* N-dimensional op must be contiguous */
+            }
+            else if (operation_order == 0) {
+                operation_order = op_order; /* op fixes order */
+            }
+            else if (operation_order != op_order) {
+                return 2;
+            }
+        }
+    }
+
+    if (op[nin] == NULL) {
+        /* If the output is NULL, we can create a temporary one */
+        return 1;
+    }
+    else {
+        /* If any input overlaps with the output, we use the full path. */
+        for (int iop = 0; iop < nin; iop++) {
+            if (!PyArray_EQUIVALENTLY_ITERABLE_OVERLAP_OK(
+                        op[iop], op[nin], PyArray_TRIVIALLY_ITERABLE_OP_READ,
+                        PyArray_TRIVIALLY_ITERABLE_OP_NOREAD)) {
+                return 2;
+            }
+        }
+        /* Check self-overlap (non 1-D are contiguous, perfect overlap is OK)
+         */
+        if (operation_ndim == 1 &&
+            PyArray_STRIDES(op[nin])[0] < PyArray_ITEMSIZE(op[nin]) &&
+            PyArray_STRIDES(op[nin])[0] != 0) {
+            return 2;
+        }
+    }
+
+    return 1;
+}
+
 /*
  * Calls the given __array_prepare__ function on the operand *op,
  * substituting it in place if a new array is returned and matches
@@ -1393,7 +1493,7 @@ try_trivial_single_output_loop(PyArrayMethod_Context *context,
         NPY_BEGIN_THREADS_THRESHOLDED(count);
     }
 
-    int res = strided_loop(context, data, &count, fixed_strides, auxdata);
+    CMLQ_PAPI_REGION("core_loop", int res = strided_loop(context, data, &count, fixed_strides, auxdata));
 
     NPY_END_THREADS;
     NPY_AUXDATA_FREE(auxdata);
@@ -3044,7 +3144,7 @@ PyUFunc_Reduce(PyUFuncObject *ufunc,
     /* These parameters come from a TLS global */
     int buffersize = 0, errormask = 0;
 
-    NPY_UF_DBG_PRINT1("\nEvaluating ufunc %s.reduce\n", ufunc_name);
+    //NPY_UF_DBG_PRINT1("\nEvaluating ufunc %s.reduce\n", ufunc_name);
 
     ndim = PyArray_NDIM(arr);
 
@@ -5225,6 +5325,7 @@ PyUFunc_FromFuncAndDataAndSignatureAndIdentity(PyUFuncGenericFunction *func, voi
     ufunc->ntypes = ntypes;
     ufunc->core_signature = NULL;
     ufunc->core_enabled = 0;
+    ufunc->specializable = 1;
     ufunc->obj = NULL;
     ufunc->core_num_dims = NULL;
     ufunc->core_num_dim_ix = 0;
@@ -5551,6 +5652,7 @@ PyUFunc_RegisterLoopForType(PyUFuncObject *ufunc,
 
     if (ufunc->userloops == NULL) {
         ufunc->userloops = PyDict_New();
+        ufunc->specializable = 0;
     }
     key = PyLong_FromLong((long) usertype);
     if (key == NULL) {

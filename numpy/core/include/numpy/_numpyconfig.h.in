@@ -27,6 +27,8 @@
 #mesondefine NPY_ABI_VERSION
 #mesondefine NPY_API_VERSION
 
+#mesondefine CMLQ_STATS
+
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS 1
 #endif

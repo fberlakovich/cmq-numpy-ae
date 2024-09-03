@@ -22,7 +22,7 @@
  *
  * Returns -1 on failure.
  */
-static int
+int
 get_array_ufunc_overrides(PyObject *in_args, PyObject *out_args, PyObject *wheremask_obj,
                           PyObject **with_override, PyObject **methods)
 {

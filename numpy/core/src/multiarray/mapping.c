@@ -1312,6 +1312,67 @@ array_item(PyArrayObject *self, Py_ssize_t i)
 }
 
 
+#include "cmlq.h"
+
+int mapping_cache_index_preparation(CMLQSubscriptCacheElem *restrict elem, PyArrayObject *array, PyObject *subscript)
+{
+    npy_index_info indices[NPY_MAXDIMS * 2 + 1];
+    int index_num;
+    int ndim, fancy_ndim;
+
+    // analyze the index
+    int index_type = prepare_index(array, subscript, indices, &index_num,
+       &ndim, &fancy_ndim, 1);
+
+    elem->indices = PyMem_Calloc(index_num, sizeof(npy_index_info));
+    memcpy(elem->indices, indices, index_num * sizeof(npy_index_info));
+    elem->index_type = index_type;
+    elem->index_num = index_num;
+    elem->array_ndim = PyArray_NDIM(array);
+
+    return index_type;
+}
+
+int cmlq_subscript_constant_slice(void *restrict external_cache_pointer, PyObject *restrict **stack_pointer_ptr)
+{
+
+    CMLQSubscriptCacheElem *restrict elem = (CMLQSubscriptCacheElem *)external_cache_pointer;
+    assert(external_cache_pointer);
+
+    PyObject *m1 = (*stack_pointer_ptr)[-1];
+
+    if (!PyArray_Check(m1)) {
+        goto deopt;
+    }
+
+    PyArrayObject *array = (PyArrayObject *)m1;
+    if (PyDataType_HASFIELDS(PyArray_DESCR(array))) {
+        goto deopt;
+    }
+
+    if (PyArray_NDIM(array) != elem->array_ndim) {
+        goto deopt;
+    }
+
+    assert(elem->indices != NULL);
+
+    PyArrayObject *view = NULL;
+
+    if (get_view_from_index(array, &view, elem->indices, elem->index_num,
+                        (elem->index_type & HAS_FANCY)) < 0) {
+        goto fail;
+    }
+
+    Py_DECREF(m1);
+    (*stack_pointer_ptr)[-1] = (PyObject *) view;
+    return 0;
+
+deopt:
+    return 2;
+fail:
+    return -1;
+}
+
 /* make sure subscript always returns an array object */
 NPY_NO_EXPORT PyObject *
 array_subscript_asarray(PyArrayObject *self, PyObject *op)

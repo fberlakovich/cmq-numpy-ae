@@ -16,6 +16,11 @@ project(
   ],
 )
 
+buildtype = get_option('buildtype')
+if buildtype == 'debug'
+  add_project_arguments([ '-ggdb3' ], language: ['c', 'cpp'])
+endif
+
 fs = import('fs')
 
 cc = meson.get_compiler('c')

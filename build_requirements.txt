@@ -4,3 +4,4 @@ wheel==0.38.1
 ninja
 spin==0.7
 build
+mako

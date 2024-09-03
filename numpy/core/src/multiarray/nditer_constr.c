@@ -99,6 +99,33 @@ npyiter_get_priority_subtype(int nop, PyArrayObject **op,
 static int
 npyiter_allocate_transfer_functions(NpyIter *iter);
 
+#include "cmlq.h"
+
+void
+npyiter_set_state_from_cache(NpyIter *iter, CMLQIterCache *cache)
+{
+    NIT_ITFLAGS(iter) = cache->itflags;
+    NIT_ITERSIZE(iter) = cache->itersize;
+    NIT_ITERSTART(iter) = cache->iterstart;
+    NIT_ITEREND(iter) = cache->iterend;
+    NIT_ITERINDEX(iter) = cache->iterindex;
+    NIT_MASKOP(iter) = cache->maskop;
+    NIT_NDIM(iter) = cache->ndim;
+    NIT_NOP(iter) = cache->nop;
+}
+
+void
+npyiter_copy_state_to_cache(NpyIter *iter, CMLQIterCache *cache)
+{
+    cache->itflags = NIT_ITFLAGS(iter);
+    cache->itersize = NIT_ITERSIZE(iter);
+    cache->iterstart = NIT_ITERSTART(iter);
+    cache->iterend = NIT_ITEREND(iter);
+    cache->iterindex = NIT_ITERINDEX(iter);
+    cache->maskop = NIT_MASKOP(iter);
+    cache->ndim = NIT_NDIM(iter);
+    cache->nop = NIT_NOP(iter);
+}
 
 /*NUMPY_API
  * Allocate a new iterator for multiple array objects, and advanced

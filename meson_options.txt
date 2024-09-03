@@ -24,6 +24,10 @@ option('cpu-baseline', type: 'string', value: 'min',
         description: 'Minimal set of required CPU features')
 option('cpu-dispatch', type: 'string', value: 'max -xop -fma4',
         description: 'Dispatched set of additional CPU features')
+option('debug-loops', type: 'boolean', value: false,
+       description: 'Build the core loops with debugging enabled')
+option('cmlq-stats', type: 'boolean', value: false,
+       description: 'Build with stats recording')
 option('test-simd', type: 'array',
         value: [
           'BASELINE', 'SSE2', 'SSE42', 'XOP', 'FMA4',

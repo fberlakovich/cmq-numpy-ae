@@ -19,17 +19,21 @@
 #include <Python.h>
 #include <structmember.h>
 
-#include <numpy/npy_common.h>
 #include "numpy/arrayobject.h"
 #include "numpy/arrayscalars.h"
-
 #include "numpy/npy_math.h"
-#include "npy_argparse.h"
+
 #include "npy_config.h"
 #include "npy_pycompat.h"
-#include "npy_import.h"
+
 #include "convert_datatype.h"
 #include "legacy_dtype_implementation.h"
+#include "npy_argparse.h"
+#include "npy_import.h"
+
+#include <mapping.h>
+#include <numpy/npy_common.h>
+#include <opcode.h>
 
 NPY_NO_EXPORT int NPY_NUMUSERTYPES = 0;
 
@@ -4537,7 +4541,16 @@ _using_numpy2_behavior(
 }
 
 
+#ifdef CMLQ_STATS
+NPY_NO_EXPORT PyObject *get_cache_stats();
+#endif
+
 static struct PyMethodDef array_module_methods[] = {
+#ifdef CMLQ_STATS
+    {"get_cmlq_stats",
+        (PyCFunction)get_cache_stats,
+        METH_NOARGS, NULL},
+#endif
     {"_get_implementing_args",
         (PyCFunction)array__get_implementing_args,
         METH_VARARGS, NULL},
@@ -5074,6 +5087,334 @@ static struct PyModuleDef moduledef = {
         NULL
 };
 
+
+#define SLOT_START 40
+#define NEXT_SLOT() (__COUNTER__ + SLOT_START)
+
+#include "cmlq_decl.h"
+
+int cmlq_subscript_constant_slice(void *restrict external_cache_pointer, PyObject *restrict **stack_pointer_ptr);
+
+#define SLOT_SUBSCRIPT_CONSTANT_SLICE NEXT_SLOT()
+
+static int is_constant_slice(_Py_CODEUNIT *instr)
+{
+    if (instr->op.code != BUILD_SLICE) {
+        return 0;
+    }
+
+
+    if ((instr - 1)->op.code != LOAD_CONST ||
+            (instr - 2)->op.code != LOAD_CONST) {
+        return 0;
+    }
+
+    if (instr->op.arg == 2) {
+        return 1;
+    }
+
+    return (instr - 3)->op.code == LOAD_CONST;
+}
+
+static int is_constant_tuple_subscript(_Py_CODEUNIT *instr)
+{
+    if (instr->op.code != BUILD_TUPLE) {
+        return 0;
+    }
+
+    _Py_CODEUNIT *next_subindex_instr = instr - 1;
+    for (int i = 0; i < instr->op.arg; i++) {
+        if (is_constant_slice(next_subindex_instr)) {
+            next_subindex_instr -= 3;
+            continue;
+        }
+
+        if (next_subindex_instr->op.code == LOAD_CONST) {
+            next_subindex_instr -= 1;
+            continue;
+        }
+
+        return 0;
+    }
+
+    return 1;
+}
+
+int prepare_index(PyArrayObject *self, PyObject *index,
+              npy_index_info *indices,
+              int *num, int *ndim, int *out_fancy_ndim, int allow_boolean);
+
+#define HAS_INTEGER 1
+#define HAS_NEWAXIS 2
+#define HAS_SLICE 4
+#define HAS_ELLIPSIS 8
+/* HAS_FANCY can be mixed with HAS_0D_BOOL, be careful when to use & or == */
+#define HAS_FANCY 16
+#define HAS_BOOL 32
+/* NOTE: Only set if it is neither fancy nor purely integer index! */
+#define HAS_SCALAR_ARRAY 64
+
+
+
+#include "cmlq.h"
+
+SpecializeInstructionPtr SpecializeInstruction = NULL;
+CMLQLocalityCacheElem locality_cache[CMLQ_CACHE_SIZE];
+static int next_result_cache_index = -1;
+CMLQSubscriptCacheElem subscript_cache[SUBSCRIPT_CACHE_SIZE];
+static int next_subscript_cache_index = -1;
+int
+mapping_cache_index_preparation(CMLQSubscriptCacheElem *restrict elem,
+                                PyArrayObject *array, PyObject *subscript);
+void
+invalidate_cache_entry(_Py_CODEUNIT *instr, void *cache_pointer);
+static PyExternalSpecializer specializer_info;
+
+static void
+report_missing_binop_case(_Py_CODEUNIT *instr, PyObject *lhs, PyObject *rhs) {
+    // if (PyArray_CheckExact(lhs) || PyArray_CheckExact(rhs)) {
+    //     fprintf(stderr, "==== Missing Binop Case ====\n");
+    //     fprintf(stderr, "Cannot specialize: \n");
+    //     fprintf(stderr, "op: %d\n", instr->op.arg);
+    //     fprintf(stderr, "lhs: ");
+    //     PyObject_Print(lhs, stderr, 0);
+    //     fprintf(stderr, "\n");
+    //     fprintf(stderr, "rhs: ");
+    //     PyObject_Print(rhs, stderr, 0);
+    //     fprintf(stderr, "\n");
+    //     fprintf(stderr, "======================\n");
+    //     fprintf(stderr, "\n");
+    //     fprintf(stderr, "\n");
+    // }
+}
+
+static int
+np_specialize_op(_Py_CODEUNIT *instr, PyObject ***stack_pointer)
+{
+
+#define STACK_ELEMENT(i) (*stack_pointer)[i]
+
+    switch (instr->op.code) {
+        // TODO: cache information that is expensive to compute, e.g. ufunc
+        // overloads
+        case BINARY_OP: {
+            PyObject *rhs = STACK_ELEMENT(-1);
+            PyObject *lhs = STACK_ELEMENT(-2);
+
+            assert(PyArray_CheckExact(lhs) || !PyArray_Check(lhs));
+            assert(PyArray_CheckExact(rhs) || !PyArray_Check(rhs));
+
+            switch (instr->op.arg) {
+#include "cmlq_binop_case_guards.h"
+
+                default:
+                {
+                    report_missing_binop_case(instr, lhs, rhs);
+                }
+            }
+            break;
+        }
+        case BINARY_SUBSCR: {
+            PyObject *subscript = STACK_ELEMENT(-1);
+            PyObject *array = STACK_ELEMENT(-2);
+            if (PyArray_CheckExact(array) && !PyDataType_HASFIELDS(PyArray_DESCR((PyArrayObject *)array))) {
+                if (PyTuple_CheckExact(subscript)) {
+                    if (is_constant_tuple_subscript(instr - 1)) {
+
+                        int index_type = mapping_cache_index_preparation(&subscript_cache[next_subscript_cache_index+1], (PyArrayObject *)array, subscript);;
+
+                        if (index_type == HAS_INTEGER) {
+                            // pure integer subscript
+                            // TODO: implement
+                            printf("Can't specialize pure integer\n");
+                            return 0;
+                        }
+
+                        if (index_type == HAS_BOOL) {
+                            // pure boolean subscript
+                            // TODO: implement
+                            printf("Can't specialize pure bool\n");
+                            return 0;
+                        }
+
+                        if (index_type == HAS_ELLIPSIS) {
+                            // pure ellipsis subscript
+                            // TODO: implement
+                            printf("Can't specialize ellipsis\n");
+                            return 0;
+                        }
+
+                        if (index_type & (HAS_SLICE | HAS_NEWAXIS |
+                                                   HAS_ELLIPSIS | HAS_INTEGER)) {
+
+                            if (index_type & HAS_SCALAR_ARRAY) {
+                                // scalar array, force copy
+                                // TODO: implement
+                                printf("Can't specialize scalar array\n");
+                                return 0;
+                            }
+
+                            if(index_type & HAS_FANCY) {
+                               // fancy indexing
+                                return 0;
+                            }
+
+                            unsigned char unused_args = 1;
+                            ++next_subscript_cache_index;
+                            specializer_info.SpecializeChain(instr, *stack_pointer, SLOT_SUBSCRIPT_CONSTANT_SLICE, cmlq_subscript_constant_slice, unused_args, &subscript_cache[next_subscript_cache_index]);
+
+                            // The specialized instruction assumes the argument was never written
+                            Py_DECREF(subscript);
+                            (*stack_pointer) -= 1;
+                            return 1;
+                        }
+                        return 0;
+                    } else {
+                        //PyExternal_SpecializeVariableSlice(frame, instr - 1, *stack_pointer);
+                    }
+                }
+            }
+            break;
+        }
+
+        case CALL: {
+            // PyCFunction_Type
+            PyObject *callable = STACK_ELEMENT(-(1 + instr->op.arg));
+            //            if (Py_TYPE(callable) == &PyUFunc_Type) {
+            //                *unused_args_bitmap |= (1 << (instr->op.arg));
+            //                *unused_args_bitmap |= (1 << (instr->op.arg + 1));
+            //                *handler = (void *)test_call;
+            //                return 8;
+            //            }
+            if (Py_TYPE(callable) == &PyUFunc_Type) {
+                PyUFuncObject *ufunc = (PyUFuncObject *)callable;
+                const char *name = ufunc_get_name_cstr(ufunc);
+
+                // TODO: this is inefficient and might even be wrong in some
+                // cases, but works for now. We should rather check for
+                // equivalence with the objects created in __umath_generated.c.
+                // From these objects we also know exactly their properties
+                // (e.g. no generalized ufunc etc)
+                if (strcmp(name, "minimum") == 0) {
+                    PyObject *rhs = STACK_ELEMENT(-1);
+                    PyObject *lhs = STACK_ELEMENT(-2);
+
+                    if (PyArray_CheckExact(lhs) &&
+                        PyArray_DESCR((PyArrayObject *)lhs)->type_num == NPY_INT &&
+                        PyArray_CheckExact(rhs) &&
+                        PyArray_DESCR((PyArrayObject *)rhs)->type_num == NPY_INT) {
+                        ++next_result_cache_index;
+#ifdef CMLQ_STATS
+                        locality_cache[next_result_cache_index].stats.instr_ptr = instr;
+#endif
+
+                        specializer_info.SpecializeInstruction(instr, SLOT_MINIMUM_AINT_AINT, cmlq_minimum_aint_aint, &locality_cache[next_result_cache_index]);
+                        return 1;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    return 0;
+}
+
+#ifdef CMLQ_STATS
+#include "cmlq.h"
+
+static const char *state_to_string(enum CMLQCacheState state)
+{
+    const char *result;
+    switch (state) {
+        case TRIVIAL:
+            result = "TRIVIAL";
+        break;
+        case ITERATOR:
+            result = "ITERATOR";
+        break;
+        case DISABLED:
+            result = "DISABLED";
+        break;
+        case BROADCAST:
+            result = "BROADCAST";
+        break;
+        case UNUSED:
+            result = "UNUSED";
+        break;
+        default:
+            result = "UNKNOW";
+        break;
+    }
+
+    return result;
+}
+
+NPY_NO_EXPORT PyObject *
+get_cache_stats() {
+    PyObject* result_list = PyList_New(0); // Create an empty Python list
+
+    if (result_list == NULL) {
+        // Failed to create list
+        return NULL;
+    }
+
+    for (int i = 0; i < CMLQ_CACHE_SIZE; i++) {
+        CMLQLocalityCacheElem *elem = &locality_cache[i];
+        if (elem->stats.instr_ptr == NULL) {
+            continue;
+        }
+
+        // Create a dictionary for the current struct
+        PyObject* dict = PyDict_New();
+
+        if (dict == NULL) {
+            // Failed to create dictionary
+            Py_DECREF(result_list);
+            return NULL;
+        }
+
+#define ADD_COUNTER(name) PyDict_SetItemString(dict, #name, PyLong_FromUnsignedLongLong(cache_elem.name))
+
+        CMLQCacheStatsElem cache_elem = elem->stats;
+        // Add key-value pairs to the dictionary
+        PyDict_SetItemString(dict, "state", PyUnicode_FromString(state_to_string(elem->state)));
+        PyDict_SetItemString(dict, "last_state", PyUnicode_FromString(state_to_string(elem->stats.last_state)));
+        PyDict_SetItemString(dict, "opname", PyUnicode_FromString(cache_elem.opname));
+        PyDict_SetItemString(dict, "instr_ptr", PyLong_FromVoidPtr((void *)elem->stats.instr_ptr));
+        ADD_COUNTER(op_exec_count);
+        ADD_COUNTER(trivial_cache_hits);
+        ADD_COUNTER(trivial_cache_misses);
+        ADD_COUNTER(iterator_cache_hits);
+        ADD_COUNTER(iterator_cache_misses);
+        ADD_COUNTER(result_cache_hits);
+        ADD_COUNTER(result_cache_misses);
+        ADD_COUNTER(refcnt_misses);
+        ADD_COUNTER(ndims_misses);
+        ADD_COUNTER(shape_misses);
+        ADD_COUNTER(temp_elision_hits);
+        ADD_COUNTER(trivial_case);
+        ADD_COUNTER(iterator_case);
+        ADD_COUNTER(left_type_misses);
+        ADD_COUNTER(right_type_misses);
+        ADD_COUNTER(exponent_type_misses);
+        ADD_COUNTER(ufunc_type_misses);
+        ADD_COUNTER(function_end_clear);
+        ADD_COUNTER(trivial_cache_init);
+        ADD_COUNTER(iterator_cache_init);
+
+        // Append the dictionary to the result list
+        PyList_Append(result_list, dict);
+
+        // Decrement the reference count of the dictionary
+        Py_DECREF(dict);
+    }
+
+    return result_list;
+}
+#endif
+
+
 /* Initialization function for the module */
 PyMODINIT_FUNC PyInit__multiarray_umath(void) {
     PyObject *m, *d, *s;
@@ -5338,6 +5679,29 @@ PyMODINIT_FUNC PyInit__multiarray_umath(void) {
     if (current_handler == NULL) {
         goto err;
     }
+
+    if (next_result_cache_index == -1) {
+        for (int i = 0; i < CMLQ_CACHE_SIZE; i++) {
+            CMLQLocalityCacheElem *restrict elem = &locality_cache[i];
+            elem->state = UNUSED;
+            RESET_CACHE_COUNTER(elem);
+#ifdef CMLQ_STATS
+            memset(&elem->stats, 0, sizeof(CMLQCacheStatsElem));
+#endif
+        }
+    }
+
+    if (next_subscript_cache_index == -1) {
+        for (int i=0; i<SUBSCRIPT_CACHE_SIZE; i++) {
+            subscript_cache[i].instr = NULL;
+            subscript_cache[i].indices = NULL;
+        }
+    }
+
+
+    specializer_info.TrySpecialization = np_specialize_op;
+    specializer_info.FunctionEnd = invalidate_cache_entry;
+    PyExternal_SetSpecializer(&specializer_info);
 
     return m;
 

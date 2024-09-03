@@ -136,6 +136,9 @@ typedef struct _tagPyUFuncObject {
         /* number of distinct dimension names in signature */
         int core_num_dim_ix;
 
+        /* 1 if the ufunc has no special properties (user loops, generalized, ...), 0 otherwise */
+        int specializable;
+
         /*
          * dimension indices of input/output argument k are stored in
          * core_dim_ixs[core_offsets[k]..core_offsets[k]+core_num_dims[k]-1]

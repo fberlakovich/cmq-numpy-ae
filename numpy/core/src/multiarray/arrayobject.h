@@ -51,4 +51,6 @@ static const int NPY_ARRAY_WAS_PYTHON_COMPLEX = (1 << 28);
 static const int NPY_ARRAY_WAS_INT_AND_REPLACED = (1 << 27);
 static const int NPY_ARRAY_WAS_PYTHON_LITERAL = (1 << 30 | 1 << 29 | 1 << 28);
 
+static const int NPY_ARRAY_IN_LOCALITY_CACHE = (1 << 26);
+
 #endif  /* NUMPY_CORE_SRC_MULTIARRAY_ARRAYOBJECT_H_ */

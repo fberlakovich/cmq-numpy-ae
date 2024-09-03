@@ -4,8 +4,11 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-#include "npy_config.h"
 #include "numpy/arrayobject.h"
+
+#include "npy_config.h"
+
+#include <arrayobject.h>
 
 #define NPY_NUMBER_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof(a[0]))
@@ -290,12 +293,19 @@ can_elide_temp(PyObject *olhs, PyObject *orhs, int *cannot)
      * array of a basic type, own its data and size larger than threshold
      */
     PyArrayObject *alhs = (PyArrayObject *)olhs;
-    if (Py_REFCNT(olhs) != 1 || !PyArray_CheckExact(olhs) ||
-            !PyArray_ISNUMBER(alhs) ||
-            !PyArray_CHKFLAGS(alhs, NPY_ARRAY_OWNDATA) ||
-            !PyArray_ISWRITEABLE(alhs) ||
-            PyArray_CHKFLAGS(alhs, NPY_ARRAY_WRITEBACKIFCOPY) ||
-            PyArray_NBYTES(alhs) < NPY_MIN_ELIDE_BYTES) {
+    if (!PyArray_CheckExact(olhs)) {
+        return 0;
+    }
+
+    int only_temp_usage = Py_REFCNT(alhs) == 1 ||
+                          (PyArray_FLAGS(alhs) & NPY_ARRAY_IN_LOCALITY_CACHE &&
+                           Py_REFCNT(alhs) == 2);
+    if (!only_temp_usage ||
+        !PyArray_ISNUMBER(alhs) ||
+        !PyArray_CHKFLAGS(alhs, NPY_ARRAY_OWNDATA) ||
+        !PyArray_ISWRITEABLE(alhs) ||
+        PyArray_CHKFLAGS(alhs, NPY_ARRAY_WRITEBACKIFCOPY) ||
+        PyArray_NBYTES(alhs) < NPY_MIN_ELIDE_BYTES) {
         return 0;
     }
     if (PyArray_CheckExact(orhs) ||
@@ -337,6 +347,29 @@ can_elide_temp(PyObject *olhs, PyObject *orhs, int *cannot)
  * try eliding a binary op, if commutative is true also try swapped arguments
  */
 NPY_NO_EXPORT int
+determine_elide_temp_binary(PyObject * m1, PyObject * m2,
+                 PyObject ** res, int commutative)
+{
+    /* set when no elision can be done independent of argument order */
+    int cannot = 0;
+    if (can_elide_temp(m1, m2, &cannot)) {
+        *res = m1;
+        return 1;
+    }
+    else if (commutative && !cannot) {
+        if (can_elide_temp(m2, m1, &cannot)) {
+            *res = m2;
+            return 1;
+        }
+    }
+    *res = NULL;
+    return 0;
+}
+
+/*
+ * try eliding a binary op, if commutative is true also try swapped arguments
+ */
+NPY_NO_EXPORT int
 try_binary_elide(PyObject * m1, PyObject * m2,
                  PyObject * (inplace_op)(PyArrayObject * m1, PyObject * m2),
                  PyObject ** res, int commutative)
@@ -368,7 +401,16 @@ NPY_NO_EXPORT int
 can_elide_temp_unary(PyArrayObject * m1)
 {
     int cannot;
-    if (Py_REFCNT(m1) != 1 || !PyArray_CheckExact(m1) ||
+    if (!PyArray_CheckExact(m1)) {
+        return 0;
+    }
+
+    int only_temp_usage = Py_REFCNT(m1) == 1 ||
+                          (PyArray_FLAGS(m1) & NPY_ARRAY_IN_LOCALITY_CACHE &&
+                           Py_REFCNT(m1) == 2);
+
+
+    if (!only_temp_usage ||
             !PyArray_ISNUMBER(m1) ||
             !PyArray_CHKFLAGS(m1, NPY_ARRAY_OWNDATA) ||
             !PyArray_ISWRITEABLE(m1) ||

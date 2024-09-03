@@ -6,19 +6,29 @@
 #include <structmember.h>
 
 #include "numpy/arrayobject.h"
+#include "numpy/arrayscalars.h"
 
 #include "npy_config.h"
 #include "npy_pycompat.h"
-#include "npy_import.h"
-#include "common.h"
-#include "number.h"
-#include "temp_elide.h"
 
-#include "binop_override.h"
-#include "ufunc_override.h"
+#include "number.h"
+
 #include "abstractdtypes.h"
+#include "binop_override.h"
+#include "common.h"
 #include "common_dtype.h"
 #include "convert_datatype.h"
+#include "extobj.h"
+#include "loops.h"
+#include "npy_import.h"
+#include "temp_elide.h"
+#include "ufunc_override.h"
+#include "umathmodule.h"
+
+#include <opcode.h>
+#ifdef CMLQ_PAPI
+#include <papi.h>
+#endif
 
 /*************************************************************************
  ****************   Implement Number Protocol ****************************
@@ -74,6 +84,9 @@ array_inplace_matrix_multiply(PyArrayObject *m1, PyObject *m2);
         Py_XDECREF(n_ops.op); \
         n_ops.op = temp; \
     }
+
+
+#include "cmlq.h"
 
 NPY_NO_EXPORT int
 _PyArray_SetNumericOps(PyObject *dict)
@@ -300,7 +313,8 @@ array_add(PyObject *m1, PyObject *m2)
     if (try_binary_elide(m1, m2, &array_inplace_add, &res, 1)) {
         return res;
     }
-    return PyArray_GenericBinaryFunction(m1, m2, n_ops.add);
+    CMLQ_PAPI_REGION("array_add", PyObject *result = PyArray_GenericBinaryFunction(m1, m2, n_ops.add));
+    return result;
 }
 
 static PyObject *
@@ -312,7 +326,8 @@ array_subtract(PyObject *m1, PyObject *m2)
     if (try_binary_elide(m1, m2, &array_inplace_subtract, &res, 0)) {
         return res;
     }
-    return PyArray_GenericBinaryFunction(m1, m2, n_ops.subtract);
+    CMLQ_PAPI_REGION("array_subtract", PyObject *result = PyArray_GenericBinaryFunction(m1, m2, n_ops.subtract));
+    return result;
 }
 
 static PyObject *
@@ -324,8 +339,104 @@ array_multiply(PyObject *m1, PyObject *m2)
     if (try_binary_elide(m1, m2, &array_inplace_multiply, &res, 1)) {
         return res;
     }
-    return PyArray_GenericBinaryFunction(m1, m2, n_ops.multiply);
+    CMLQ_PAPI_REGION("array_multiply", PyObject *result = PyArray_GenericBinaryFunction(m1, m2, n_ops.multiply));
+    return result;
 }
+
+///* We MUST forward declare here as otherwise the return pointer will be corrupted by a cltq instruction */
+//PyObject *ufunc_generic_fastcall(PyUFuncObject *ufunc, PyObject *const *args, Py_ssize_t len_args, PyObject *kwnames,
+//        npy_bool outer);
+
+int
+is_eligible_for_fast_path(int nin, PyArrayObject *op[], NPY_ORDER order,
+                          npy_intp strides_out[]);
+
+int
+get_array_ufunc_overrides(PyObject *in_args, PyObject *out_args, PyObject *wheremask_obj,
+                          PyObject **with_override, PyObject **methods);
+
+#define NPY_UFUNC_DEFAULT_INPUT_FLAGS \
+    NPY_ITER_READONLY | \
+    NPY_ITER_ALIGNED | \
+    NPY_ITER_OVERLAP_ASSUME_ELEMENTWISE
+
+#define NPY_UFUNC_DEFAULT_OUTPUT_FLAGS \
+    NPY_ITER_ALIGNED | \
+    NPY_ITER_ALLOCATE | \
+    NPY_ITER_NO_BROADCAST | \
+    NPY_ITER_NO_SUBTYPE | \
+    NPY_ITER_OVERLAP_ASSUME_ELEMENTWISE
+
+static void iterator_cache_miss(CMLQLocalityCacheElem *elem)
+{
+    assert(elem->state == ITERATOR);
+    ((PyArrayObject_fields *)elem->result)->flags &= ~NPY_ARRAY_IN_LOCALITY_CACHE;
+    NpyIter_Deallocate(elem->iterator.cached_iter);
+    elem->state = UNUSED;
+    elem->result = NULL;
+    elem->iterator.cached_iter = NULL;
+    elem->miss_counter++;
+
+    if (IS_RESULT_CACHE_UNSTABLE(elem)) {
+        // TODO: use an instruction derivative to model the states (with/without cache, maybe also TRIVIAL vs ITERATOR)
+        elem->state = DISABLED;
+    }
+}
+
+static void trivial_cache_miss(CMLQLocalityCacheElem *elem)
+{
+    assert(elem->state == TRIVIAL);
+    ((PyArrayObject_fields *)elem->result)->flags &= ~NPY_ARRAY_IN_LOCALITY_CACHE;
+    Py_XDECREF(elem->result);
+    elem->state = UNUSED;
+    elem->result = NULL;
+    elem->miss_counter++;
+
+    if (IS_RESULT_CACHE_UNSTABLE(elem)) {
+        // TODO: use an instruction derivative to model the states (with/without cache, maybe also TRIVIAL vs ITERATOR)
+        elem->state = DISABLED;
+    }
+
+}
+
+void cache_miss(CMLQLocalityCacheElem *elem)
+{
+    if (elem->state == TRIVIAL) {
+        trivial_cache_miss(elem);
+    }
+    else if (elem->state == ITERATOR) {
+        iterator_cache_miss(elem);
+    }
+}
+
+void invalidate_cache_entry(_Py_CODEUNIT *instr, void *cache_pointer)
+{
+    if (instr->op.code == BINARY_OP_EXTERNAL || instr->op.code == CALL_EXTERNAL) {
+        CMLQLocalityCacheElem *restrict elem = cache_pointer;
+
+        if (elem->state == BROADCAST) {
+            // the broadcast cache remains
+            return;
+        }
+
+        // only free the cache if it is a large one
+        if (elem->result && PyArray_NBYTES(elem->result)  >= getpagesize()) {
+#ifdef CMLQ_STATS
+            elem->stats.last_state = elem->state;
+            elem->stats.function_end_clear++;
+#endif
+            cache_miss(elem);
+            elem->state = UNUSED;
+        }
+
+        RESET_CACHE_COUNTER(elem);
+    }
+}
+
+
+
+#include "cmlq_impl.h"
+
 
 static PyObject *
 array_remainder(PyObject *m1, PyObject *m2)
@@ -800,7 +911,8 @@ array_true_divide(PyObject *m1, PyObject *m2)
             try_binary_elide(m1, m2, &array_inplace_true_divide, &res, 0)) {
         return res;
     }
-    return PyArray_GenericBinaryFunction(m1, m2, n_ops.true_divide);
+    CMLQ_PAPI_REGION("array_true_divide", PyObject *result = PyArray_GenericBinaryFunction(m1, m2, n_ops.true_divide));
+    return result;
 }
 
 static PyObject *

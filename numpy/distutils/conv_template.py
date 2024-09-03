@@ -209,7 +209,7 @@ def parse_loop_header(loophead) :
 
 replace_re = re.compile(r"@(\w+)@")
 def parse_string(astr, env, level, line) :
-    lineno = "#line %d\n" % line
+#    lineno = "#line %d\n" % line
 
     # local function for string replacement, uses env
     def replace(match):
@@ -221,7 +221,7 @@ def parse_string(astr, env, level, line) :
             raise ValueError(msg) from None
         return val
 
-    code = [lineno]
+    code = []
     struct = parse_structure(astr, level)
     if struct :
         # recurse over inner loops
@@ -285,7 +285,8 @@ def process_file(source):
         code = process_str(''.join(lines))
     except ValueError as e:
         raise ValueError('In "%s" loop at %s' % (sourcefile, e)) from None
-    return '#line 1 "%s"\n%s' % (sourcefile, code)
+    # return '#line 1 "%s"\n%s' % (sourcefile, code)
+    return code
 
 
 def unique_key(adict):

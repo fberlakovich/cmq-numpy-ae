@@ -25,6 +25,7 @@ __all__ = [
     'ITEM_HASOBJECT', 'ITEM_IS_POINTER', 'LIST_PICKLE', 'MAXDIMS',
     'MAY_SHARE_BOUNDS', 'MAY_SHARE_EXACT', 'NEEDS_INIT', 'NEEDS_PYAPI',
     'RAISE', 'USE_GETITEM', 'USE_SETITEM', 'WRAP',
+    'get_cmlq_stats',
     '_flagdict', 'from_dlpack', '_place', '_reconstruct', '_vec_string',
     '_monotonicity', 'add_docstring', 'arange', 'array', 'asarray',
     'asanyarray', 'ascontiguousarray', 'asfortranarray', 'bincount',
