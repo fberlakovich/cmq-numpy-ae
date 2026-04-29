@@ -39,7 +39,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.9'
     - name: Install linter requirements
@@ -59,7 +59,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.9'
     - uses: ./.github/meson_actions
@@ -78,7 +78,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: ${{ matrix.python-version }}
     - uses: ./.github/actions
@@ -94,7 +94,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.11'
 
@@ -109,7 +109,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.9'
     - name: Install build and test dependencies from PyPI
@@ -150,7 +150,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.9'
     - uses: ./.github/actions
@@ -168,7 +168,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.11'
     - uses: ./.github/actions
@@ -182,7 +182,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.11'
     - name: Install gfortran and OpenBLAS (MacPython build)
@@ -215,7 +215,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-    - uses: actions/setup-python@61a6322f88396a6271a6ee3565807d608ecaddd1 # v4.7.0
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.11'
     - name: Install build and test dependencies from PyPI
